@@ -1,0 +1,19 @@
+{
+  "name": "ai-social-media-manager",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Monorepo for an AI Social Media Manager with a Next.js client and FastAPI backend.",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "node scripts/dev.mjs",
+    "dev:client": "npm --prefix client run dev",
+    "dev:server": "node scripts/server-dev.mjs",
+    "prisma:generate": "node scripts/prisma-generate.mjs",
+    "prisma:migrate": "node scripts/prisma-migrate.mjs",
+    "prisma:push": "node scripts/prisma-push.mjs",
+    "prisma:studio": "node scripts/prisma-studio.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

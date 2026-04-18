@@ -1,0 +1,225 @@
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AssetType {
+  MAGAZINE_PDF
+  MODEL_IMAGE
+}
+
+enum Platform {
+  INSTAGRAM
+  FACEBOOK
+  TWITTER
+  LINKEDIN
+}
+
+enum AspectRatio {
+  SQUARE_1_1
+  PORTRAIT_4_5
+  STORY_9_16
+  LANDSCAPE_16_9
+  LINKEDIN_1_91_1
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PublishStatus {
+  NOT_SCHEDULED
+  QUEUED
+  PUBLISHING
+  PUBLISHED
+  FAILED
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  EDITOR
+  VIEWER
+}
+
+enum OAuthProvider {
+  GOOGLE
+  TWITTER
+}
+
+model User {
+  id             String     @id @default(uuid())
+  email          String     @unique
+  name           String
+  role           UserRole   @default(EDITOR)
+  avatarUrl      String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  createdAssets  Asset[]    @relation("AssetCreatedBy")
+  campaigns      Campaign[] @relation("CampaignCreatedBy")
+  generatedPosts Post[]     @relation("PostGeneratedBy")
+  approvedPosts  Post[]     @relation("PostApprovedBy")
+  oauthCredentials OAuthCredential[]
+  oauthStates      OAuthState[]
+
+  @@index([role])
+}
+
+model Asset {
+  id            String     @id @default(uuid())
+  type          AssetType
+  fileName      String
+  contentType   String
+  fileSizeBytes BigInt?
+  gcsUrl        String
+  gcsBucket     String?
+  gcsObjectName String?
+  thumbnailUrl  String?
+  description   String?
+  metadata      Json?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  createdById   String?
+  createdBy     User?      @relation("AssetCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  campaignId    String?
+  campaign      Campaign?  @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  posts         Post[]
+
+  @@index([type])
+  @@index([campaignId])
+  @@index([createdById])
+}
+
+model Campaign {
+  id          String    @id @default(uuid())
+  name        String
+  description String?
+  startsAt    DateTime?
+  endsAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  createdById String?
+  createdBy   User?     @relation("CampaignCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  assets      Asset[]
+  posts       Post[]
+  oauthCredentials OAuthCredential[]
+  oauthStates      OAuthState[]
+
+  @@index([createdById])
+  @@index([startsAt])
+}
+
+model OAuthCredential {
+  id                    String        @id @default(uuid())
+  provider              OAuthProvider
+  providerAccountId     String?
+  scope                 String?
+  tokenType             String?
+  encryptedAccessToken  String
+  encryptedRefreshToken String?
+  expiresAt             DateTime?
+  contextKey            String        @default("global")
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  userId                String
+  user                  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaignId            String?
+  campaign              Campaign?     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, userId, contextKey])
+  @@index([provider])
+  @@index([userId])
+  @@index([campaignId])
+}
+
+model OAuthState {
+  state                String        @id
+  provider             OAuthProvider
+  encryptedCodeVerifier String?
+  redirectAfter        String?
+  expiresAt            DateTime
+  createdAt            DateTime      @default(now())
+
+  userId               String
+  user                 User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaignId           String?
+  campaign             Campaign?     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([provider])
+  @@index([userId])
+  @@index([campaignId])
+  @@index([expiresAt])
+}
+
+model Post {
+  id                   String         @id @default(uuid())
+  platform             Platform
+  generatedCaption     String
+  selectedAspectRatio  AspectRatio
+  approvalStatus       ApprovalStatus @default(PENDING)
+  publishStatus        PublishStatus   @default(NOT_SCHEDULED)
+  scheduledPublishTime DateTime?
+  publishedAt          DateTime?
+  externalPostId       String?
+  lastPublishError     String?
+  rejectionReason      String?
+  aiMetadata           Json?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  campaignId           String
+  campaign             Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  assetId              String?
+  asset                Asset?         @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  generatedById        String?
+  generatedBy          User?          @relation("PostGeneratedBy", fields: [generatedById], references: [id], onDelete: SetNull)
+  approvedById         String?
+  approvedBy           User?          @relation("PostApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  tags                 PostTag[]
+
+  @@index([platform])
+  @@index([approvalStatus])
+  @@index([publishStatus])
+  @@index([scheduledPublishTime])
+  @@index([campaignId])
+  @@index([assetId])
+}
+
+model TagDirectory {
+  id          String    @id @default(uuid())
+  displayName String
+  handle      String?
+  platform    Platform?
+  notes       String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  posts       PostTag[]
+
+  @@unique([displayName, platform])
+  @@index([handle])
+  @@index([isActive])
+}
+
+model PostTag {
+  postId String
+  tagId  String
+
+  post   Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tag    TagDirectory @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([postId, tagId])
+}
