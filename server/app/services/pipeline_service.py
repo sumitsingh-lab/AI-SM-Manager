@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from fastapi import HTTPException, UploadFile, status
 
 from app.db import db
-from app.services.ai_agents import CaptionReview, CopywriterAgent, PlatformCaption, ReviewOutput, SupervisorReviewAgent
+from app.services.ai_agents import (
+    CaptionReview,
+    CopywriterAgent,
+    PostConcept,
+    ReviewOutput,
+    SupervisorReviewAgent,
+    TagDirectoryContext,
+)
 from app.services.image_composition_service import ImageCompositionService
 from app.services.json_utils import prisma_json
 from app.services.parsing_service import MagazineMetadata, ParsingService
@@ -31,6 +38,7 @@ class DraftPostResult:
 class PipelineResult:
     asset_id: str
     metadata: MagazineMetadata
+    extracted_image_asset_ids: list[str]
     review: ReviewOutput
     posts: list[DraftPostResult]
 
@@ -57,31 +65,45 @@ class PipelineService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A campaign_id is required.")
 
         await self._ensure_campaign_and_user(resolved_campaign_id, user_id)
+        tag_directory = await self._load_tag_directory_context()
         parsed = await self._parser.parse_pdf_asset(asset_id)
-        copy = await self._copywriter.generate(parsed.metadata)
-        review = await self._reviewer.review(parsed.metadata, copy)
+        extracted_image_asset_ids = parsed.metadata.extracted_image_asset_ids
+        copy = await self._copywriter.generate(parsed.metadata, tag_directory, extracted_image_asset_ids)
+        review = await self._reviewer.review(parsed.metadata, copy, extracted_image_asset_ids)
         self._raise_if_not_approved(review)
-        post_asset_id = await self._create_mockup_asset(
-            source_asset_id=mockup_source_asset_id,
-            campaign_id=resolved_campaign_id,
-            user_id=user_id,
-            metadata=parsed.metadata,
-        ) or asset_id
+        fallback_post_asset_id = asset_id
+        if not extracted_image_asset_ids:
+            fallback_post_asset_id = (
+                await self._create_mockup_asset(
+                    source_asset_id=mockup_source_asset_id or asset_id,
+                    campaign_id=resolved_campaign_id,
+                    user_id=user_id,
+                    metadata=parsed.metadata,
+                )
+                or asset_id
+            )
         posts = await self._save_pending_posts(
             campaign_id=resolved_campaign_id,
-            asset_id=post_asset_id,
+            concepts=copy.post_concepts,
+            image_asset_ids=extracted_image_asset_ids,
+            fallback_asset_id=fallback_post_asset_id or asset_id,
+            tag_directory=tag_directory,
             user_id=user_id,
-            captions=copy.captions,
             metadata=parsed.metadata,
             review=review,
             source_pdf_asset_id=asset_id,
         )
-        return PipelineResult(asset_id=asset_id, metadata=parsed.metadata, review=review, posts=posts)
+        return PipelineResult(
+            asset_id=asset_id,
+            metadata=parsed.metadata,
+            extracted_image_asset_ids=extracted_image_asset_ids,
+            review=review,
+            posts=posts,
+        )
 
     async def upload_and_process_pdf(
         self,
         file: UploadFile,
-        model_image: UploadFile | None,
         campaign_id: str,
         user_id: str | None = None,
         description: str | None = None,
@@ -105,67 +127,61 @@ class PipelineService:
         )
         logger.info("Uploaded pipeline PDF asset %s", asset.id)
 
-        model_asset_id = None
-        if model_image is not None:
-            stored_model = await StorageService().upload_asset(model_image, "MODEL_IMAGE")
-            model_asset = await db.asset.create(
-                data={
-                    "type": "MODEL_IMAGE",
-                    "fileName": stored_model.file_name,
-                    "contentType": stored_model.content_type,
-                    "fileSizeBytes": stored_model.file_size_bytes,
-                    "gcsUrl": stored_model.gcs_url,
-                    "gcsBucket": stored_model.gcs_bucket,
-                    "gcsObjectName": stored_model.gcs_object_name,
-                    "thumbnailUrl": stored_model.signed_url,
-                    "description": "Model image for generated magazine mockup.",
-                    "createdById": user_id,
-                    "campaignId": campaign_id,
-                }
-            )
-            model_asset_id = model_asset.id
-
         return await self.process_existing_pdf_asset(
             asset.id,
             campaign_id=campaign_id,
             user_id=user_id,
-            mockup_source_asset_id=model_asset_id,
         )
 
     async def _save_pending_posts(
         self,
         campaign_id: str,
-        asset_id: str,
+        concepts: list[PostConcept],
+        image_asset_ids: list[str],
+        fallback_asset_id: str,
+        tag_directory: list[TagDirectoryContext],
         user_id: str | None,
-        captions: list[PlatformCaption],
         metadata: MagazineMetadata,
         review: ReviewOutput,
         source_pdf_asset_id: str,
     ) -> list[DraftPostResult]:
         reviews_by_platform = {item.platform: item for item in review.reviews}
+        tag_ids_by_name = self._tag_ids_by_name(tag_directory)
         results = []
 
-        for caption in captions:
-            platform_review = reviews_by_platform.get(caption.platform)
+        for index, concept in enumerate(concepts):
+            platform_review = reviews_by_platform.get(concept.platform)
+            asset_id = self._resolve_concept_asset_id(index, image_asset_ids, fallback_asset_id)
+            matched_tag_ids = self._resolve_tag_ids(concept.matched_tag_ids, tag_directory, tag_ids_by_name)
             ai_metadata = {
                 "parser": metadata.model_dump(mode="json"),
-                "copywriter": caption.model_dump(mode="json"),
+                "copywriter": concept.model_dump(mode="json"),
                 "review": platform_review.model_dump(mode="json") if platform_review else None,
                 "overallReviewNotes": review.overall_notes,
                 "sourcePdfAssetId": source_pdf_asset_id,
+                "extractedImageAssetIds": metadata.extracted_image_asset_ids,
+                "selectedAssetId": asset_id,
+                "matchedTagIds": matched_tag_ids,
             }
-            post = await db.post.create(
-                data={
-                    "platform": caption.platform,
-                    "generatedCaption": self._compose_caption(caption),
-                    "selectedAspectRatio": DEFAULT_ASPECT_RATIO_BY_PLATFORM[caption.platform],
-                    "approvalStatus": "PENDING",
-                    "campaignId": campaign_id,
-                    "assetId": asset_id,
-                    "generatedById": user_id,
-                    "aiMetadata": prisma_json(ai_metadata),
+            post_data = {
+                "platform": concept.platform,
+                "generatedCaption": self._compose_caption(concept),
+                "selectedAspectRatio": DEFAULT_ASPECT_RATIO_BY_PLATFORM[concept.platform],
+                "approvalStatus": "PENDING",
+                "campaignId": campaign_id,
+                "assetId": asset_id,
+                "generatedById": user_id,
+                "aiMetadata": prisma_json(ai_metadata),
+            }
+            if matched_tag_ids:
+                post_data["tags"] = {
+                    "create": [
+                        {"tag": {"connect": {"id": tag_id}}}
+                        for tag_id in matched_tag_ids
+                    ]
                 }
-            )
+
+            post = await db.post.create(data=post_data)
             results.append(
                 DraftPostResult(
                     id=post.id,
@@ -176,6 +192,18 @@ class PipelineService:
             )
 
         return results
+
+    async def _load_tag_directory_context(self) -> list[TagDirectoryContext]:
+        tags = await db.tagdirectory.find_many(where={"isActive": True}, order={"displayName": "asc"}, take=500)
+        return [
+            TagDirectoryContext(
+                id=tag.id,
+                display_name=tag.displayName,
+                handle=tag.handle,
+                platform=tag.platform,
+            )
+            for tag in tags
+        ]
 
     async def _create_mockup_asset(
         self,
@@ -202,6 +230,36 @@ class PipelineService:
         )
         return asset.id
 
+    @staticmethod
+    def _resolve_concept_asset_id(index: int, image_asset_ids: list[str], fallback_asset_id: str) -> str:
+        if image_asset_ids:
+            return image_asset_ids[index % len(image_asset_ids)]
+        return fallback_asset_id
+
+    @staticmethod
+    def _tag_ids_by_name(tag_directory: list[TagDirectoryContext]) -> dict[str, str]:
+        lookup: dict[str, str] = {}
+        for tag in tag_directory:
+            lookup[tag.id.lower()] = tag.id
+            lookup[tag.display_name.lower()] = tag.id
+            if tag.handle:
+                lookup[tag.handle.lower().lstrip("@")] = tag.id
+        return lookup
+
+    @staticmethod
+    def _resolve_tag_ids(
+        matched_tag_ids: list[str],
+        tag_directory: list[TagDirectoryContext],
+        tag_ids_by_name: dict[str, str],
+    ) -> list[str]:
+        allowed_tag_ids = {tag.id for tag in tag_directory}
+        resolved: list[str] = []
+        for tag_id in matched_tag_ids:
+            candidate = tag_ids_by_name.get(tag_id.lower(), tag_id)
+            if candidate in allowed_tag_ids and candidate not in resolved:
+                resolved.append(candidate)
+        return resolved
+
     async def _ensure_campaign_and_user(self, campaign_id: str, user_id: str | None) -> None:
         campaign = await db.campaign.find_unique(where={"id": campaign_id})
         if campaign is None:
@@ -213,11 +271,12 @@ class PipelineService:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
     @staticmethod
-    def _compose_caption(caption: PlatformCaption) -> str:
-        hashtags = " ".join(caption.hashtags)
-        if hashtags and hashtags not in caption.caption:
-            return f"{caption.caption.strip()}\n\n{hashtags}".strip()
-        return caption.caption.strip()
+    def _compose_caption(concept: PostConcept) -> str:
+        hashtags = " ".join(concept.hashtags)
+        caption = concept.caption.strip()
+        if hashtags and hashtags not in caption:
+            return f"{caption}\n\n{hashtags}".strip()
+        return caption
 
     @staticmethod
     def _raise_if_not_approved(review: ReviewOutput) -> None:

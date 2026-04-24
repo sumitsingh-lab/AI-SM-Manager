@@ -13,7 +13,6 @@ export default function UploadGeneratePage() {
   const [campaignId, setCampaignId] = useState("");
   const [description, setDescription] = useState("");
   const [pdfFile, setPdfFile] = useState<File | null>(null);
-  const [modelImage, setModelImage] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,16 +28,11 @@ export default function UploadGeneratePage() {
       setError("Choose a magazine PDF.");
       return;
     }
-    if (!modelImage) {
-      setError("Choose a model image.");
-      return;
-    }
 
     const formData = new FormData();
     formData.append("campaign_id", campaignId.trim());
     formData.append("description", description.trim());
     formData.append("file", pdfFile);
-    formData.append("model_image", modelImage);
 
     setIsSubmitting(true);
     try {
@@ -78,7 +72,7 @@ export default function UploadGeneratePage() {
               <p className="text-sm font-semibold uppercase tracking-wide text-[#0f7b63]">Upload & Generate</p>
               <h1 className="mt-2 text-3xl font-semibold tracking-normal">Create pending drafts</h1>
               <p className="mt-3 text-sm leading-6 text-[#53605a]">
-                Upload a magazine PDF and model image to generate review-ready social drafts.
+                Upload a magazine PDF with your campaign details to generate review-ready social drafts.
               </p>
             </div>
           </div>
@@ -115,24 +109,14 @@ export default function UploadGeneratePage() {
               />
             </label>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FileInput
-                id="magazine-pdf"
-                label="Magazine PDF"
-                accept="application/pdf"
-                file={pdfFile}
-                disabled={isSubmitting}
-                onChange={setPdfFile}
-              />
-              <FileInput
-                id="model-image"
-                label="Model image"
-                accept="image/png,image/jpeg,image/webp"
-                file={modelImage}
-                disabled={isSubmitting}
-                onChange={setModelImage}
-              />
-            </div>
+            <FileInput
+              id="magazine-pdf"
+              label="Magazine PDF"
+              accept="application/pdf"
+              file={pdfFile}
+              disabled={isSubmitting}
+              onChange={setPdfFile}
+            />
 
             {isSubmitting ? (
               <div className="rounded-lg border border-[#cbd3c7] bg-[#f2f5ef] p-4 text-sm leading-6 text-[#3d4742]">
@@ -141,8 +125,8 @@ export default function UploadGeneratePage() {
                   Generating drafts
                 </div>
                 <p className="mt-2">
-                  The backend is parsing the PDF, running the AI copywriter, reviewing brand safety, and executing the
-                  template-based image composition.
+                  The backend is parsing the PDF, extracting embedded images, running the AI copywriter, reviewing
+                  brand safety, and executing the template-based image composition.
                 </p>
               </div>
             ) : null}

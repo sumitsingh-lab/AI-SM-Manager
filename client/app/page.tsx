@@ -1,17 +1,29 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { AlertCircle, CalendarClock, CheckCircle2, RefreshCw, Send, UploadCloud, XCircle } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  ArrowUpRight,
+  BadgeCheck,
+  ChevronDown,
+  Clock3,
+  Loader2,
+  LayoutGrid,
+  RefreshCw,
+  Sparkles,
+  Tag,
+  UploadCloud,
+  XCircle
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
-const ASPECT_RATIOS = [
+const ASPECT_OPTIONS = [
   { value: "SQUARE_1_1", label: "1:1" },
   { value: "PORTRAIT_4_5", label: "4:5" },
   { value: "LANDSCAPE_16_9", label: "16:9" }
-];
+] as const;
 
 const SCHEDULER_PLATFORMS = ["INSTAGRAM", "FACEBOOK", "TWITTER"] as const;
 
@@ -22,7 +34,7 @@ type AssetPreview = {
   preview_url: string | null;
 };
 
-type Tag = {
+type TagDirectoryItem = {
   id: string;
   display_name: string;
   handle: string | null;
@@ -42,7 +54,7 @@ type Post = {
   rejection_reason: string | null;
   last_publish_error: string | null;
   asset: AssetPreview | null;
-  tags: Tag[];
+  tags: TagDirectoryItem[];
 };
 
 type DraftState = {
@@ -57,14 +69,27 @@ type ScheduleState = {
   platforms: string[];
 };
 
-export default function TeamWorkspace() {
+type BrandCropResponse = {
+  asset_id: string;
+  local_url: string;
+};
+
+type PublishApprovalRequest = {
+  generated_caption: string;
+  selected_aspect_ratio: string;
+  tag_ids: string[];
+  asset_id: string;
+};
+
+export default function DashboardPage() {
   const [pendingPosts, setPendingPosts] = useState<Post[]>([]);
   const [approvedPosts, setApprovedPosts] = useState<Post[]>([]);
-  const [tags, setTags] = useState<Tag[]>([]);
+  const [tags, setTags] = useState<TagDirectoryItem[]>([]);
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
   const [schedules, setSchedules] = useState<Record<string, ScheduleState>>({});
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [openTagMenuId, setOpenTagMenuId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function loadWorkspace() {
@@ -74,11 +99,13 @@ export default function TeamWorkspace() {
       const [pending, approved, directory] = await Promise.all([
         api<Post[]>("/posts?approval_status=PENDING"),
         api<Post[]>("/posts?approval_status=APPROVED"),
-        api<Tag[]>("/tags")
+        api<TagDirectoryItem[]>("/tags")
       ]);
+
       setPendingPosts(pending);
       setApprovedPosts(approved);
       setTags(directory);
+
       setDrafts((current) => ({
         ...current,
         ...Object.fromEntries(
@@ -93,6 +120,7 @@ export default function TeamWorkspace() {
           ])
         )
       }));
+
       setSchedules((current) => ({
         ...current,
         ...Object.fromEntries(
@@ -118,25 +146,59 @@ export default function TeamWorkspace() {
     loadWorkspace();
   }, []);
 
-  const queuedPosts = useMemo(
-    () => approvedPosts.filter((post) => post.publish_status !== "NOT_SCHEDULED"),
-    [approvedPosts]
+  const stats = useMemo(
+    () => [
+      { label: "Pending", value: pendingPosts.length },
+      { label: "Approved", value: approvedPosts.length },
+      { label: "Tags", value: tags.length }
+    ],
+    [approvedPosts.length, pendingPosts.length, tags.length]
   );
 
   async function approve(post: Post) {
     const draft = drafts[post.id];
+    if (!draft) {
+      setError("Draft controls are not ready yet.");
+      return;
+    }
+    if (!post.asset?.id) {
+      setError("This post is missing a source image asset.");
+      return;
+    }
+
     setBusyId(post.id);
     setError(null);
     try {
-      await api(`/posts/${post.id}/approve`, {
+      const branded = await api<BrandCropResponse>("/images/brand-and-crop", {
+        method: "POST",
+        body: JSON.stringify({
+          source_asset_id: post.asset.id,
+          aspect_ratio: draft.aspectRatio
+        })
+      });
+
+      const updated = await api<Post>(`/posts/${post.id}/approve`, {
         method: "PATCH",
         body: JSON.stringify({
           generated_caption: draft.caption,
           selected_aspect_ratio: draft.aspectRatio,
-          tag_ids: draft.tagIds
-        })
+          tag_ids: draft.tagIds,
+          asset_id: branded.asset_id
+        } satisfies PublishApprovalRequest)
       });
-      await loadWorkspace();
+
+      setPendingPosts((current) => current.filter((item) => item.id !== post.id));
+      setApprovedPosts((current) => [updated, ...current.filter((item) => item.id !== post.id)]);
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[post.id];
+        return next;
+      });
+      setSchedules((current) => ({
+        ...current,
+        [updated.id]: current[updated.id] ?? { scheduledAt: "", platforms: [updated.platform] }
+      }));
+      setOpenTagMenuId(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Approval failed.");
     } finally {
@@ -167,6 +229,7 @@ export default function TeamWorkspace() {
       setError("Choose a publish time and at least one platform.");
       return;
     }
+
     setBusyId(post.id);
     setError(null);
     try {
@@ -186,220 +249,264 @@ export default function TeamWorkspace() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f7f8f3] text-[#171717]">
-      <section className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        <header className="flex flex-col gap-4 border-b border-[#d8ddd2] pb-6 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-wide text-[#0f7b63]">Team workspace</p>
-            <h1 className="mt-2 text-3xl font-semibold tracking-normal sm:text-4xl">Approve, schedule, publish.</h1>
-            <p className="mt-3 max-w-2xl text-base leading-7 text-[#53605a]">
-              Review AI drafts, tune the caption and tags, then queue approved posts for the channels that matter.
+    <main className="min-h-screen bg-[#f4f2ec] text-[#111111]">
+      <div className="grid min-h-screen lg:grid-cols-[280px_1fr]">
+        <aside className="border-b border-[#d8d1c6] bg-[#111111] px-5 py-6 text-white lg:border-b-0 lg:border-r lg:border-[#2a2a2a] lg:px-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[#e8f3ee] text-[#0b5d4a]">
+              <Sparkles className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[#9ccbbd]">AI-SM Manager</p>
+              <h1 className="mt-1 text-xl font-semibold">Production Dashboard</h1>
+            </div>
+          </div>
+
+          <nav className="mt-8 space-y-2">
+            <NavLink active label="Grid Review" icon={<LayoutGrid className="h-4 w-4" />} />
+            <NavLink label="Upload & Generate" href="/upload-generate" icon={<UploadCloud className="h-4 w-4" />} />
+          </nav>
+
+          <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-4">
+            <p className="text-sm font-medium text-white/80">Workspace summary</p>
+            <div className="mt-4 space-y-3">
+              {stats.map((stat) => (
+                <div key={stat.label} className="flex items-center justify-between">
+                  <span className="text-sm text-white/70">{stat.label}</span>
+                  <span className="font-mono text-base text-white">{stat.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-8 rounded-2xl border border-white/10 bg-gradient-to-br from-white/10 to-transparent p-4">
+            <p className="text-sm font-semibold text-white">Workflow</p>
+            <p className="mt-2 text-sm leading-6 text-white/70">
+              Review pending cards in a 3-column grid, brand the selected image, then approve it into the approved
+              queue with tags pre-populated from the backend.
             </p>
           </div>
-          <div className="flex flex-wrap gap-3">
-            <Button asChild>
-              <Link href="/upload-generate">
-                <UploadCloud className="mr-2 h-4 w-4" />
-                Upload & Generate
-              </Link>
-            </Button>
-            <Button onClick={loadWorkspace} disabled={loading} variant="outline">
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Refresh
-            </Button>
-          </div>
-        </header>
+        </aside>
 
-        {error ? (
-          <div className="mt-5 flex items-start gap-3 rounded-lg border border-[#e3b1a7] bg-[#fff7f5] p-4 text-sm text-[#8a2d1f]">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>{error}</p>
-          </div>
-        ) : null}
+        <section className="px-4 py-6 sm:px-6 lg:px-8">
+          <header className="rounded-[2rem] border border-[#dbd4ca] bg-white/80 p-6 shadow-sm backdrop-blur">
+            <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+              <div className="max-w-3xl">
+                <p className="text-sm font-semibold uppercase tracking-[0.28em] text-[#0b5d4a]">Branding & approval</p>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
+                  Review the grid, brand the image, and push the post into production.
+                </h2>
+                <p className="mt-3 text-base leading-7 text-[#56504a]">
+                  Pending cards are editable, brand-aware, and ready to be converted into polished Instagram-ready
+                  assets. Approved cards move over automatically once the branded crop is saved.
+                </p>
+              </div>
 
-        <section className="mt-8">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-2xl font-semibold tracking-normal">Human approval</h2>
-              <p className="mt-1 text-sm text-[#53605a]">{pendingPosts.length} pending draft posts</p>
+              <div className="flex flex-wrap gap-3">
+                <Button asChild>
+                  <Link href="/upload-generate">
+                    <UploadCloud className="mr-2 h-4 w-4" />
+                    Upload & Generate
+                  </Link>
+                </Button>
+                <Button onClick={loadWorkspace} disabled={loading} variant="outline">
+                  <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                  Refresh
+                </Button>
+              </div>
             </div>
-          </div>
+          </header>
 
-          {loading ? <LoadingGrid /> : null}
-
-          {!loading && pendingPosts.length === 0 ? (
-            <EmptyState title="No pending drafts" body="Approved and rejected posts will move out of this queue." />
+          {error ? (
+            <div className="mt-5 flex items-start gap-3 rounded-2xl border border-[#e4b7aa] bg-[#fff7f3] p-4 text-sm text-[#8e3527]">
+              <div className="mt-0.5 rounded-full bg-[#ffe8e1] p-1">
+                <XCircle className="h-4 w-4" />
+              </div>
+              <p>{error}</p>
+            </div>
           ) : null}
 
-          <div className="mt-5 grid gap-5 lg:grid-cols-2">
-            {pendingPosts.map((post) => {
-              const draft = drafts[post.id];
-              return (
-                <article key={post.id} className="grid overflow-hidden rounded-lg border border-[#d8ddd2] bg-white lg:grid-cols-[minmax(220px,0.85fr)_1.15fr]">
-                  <MockupImage post={post} />
-                  <div className="p-5">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <PlatformBadge platform={post.platform} />
-                      <span className="rounded-md bg-[#edf7f3] px-2 py-1 text-xs font-medium text-[#0f7b63]">Pending</span>
-                    </div>
+          <section className="mt-8">
+            <SectionHeader
+              title="Pending"
+              body={`${pendingPosts.length} posts waiting for branded approval`}
+              right={<BadgeChip>3-column Instagram grid</BadgeChip>}
+            />
 
-                    <label className="mt-5 block text-sm font-semibold" htmlFor={`caption-${post.id}`}>
-                      Caption
-                    </label>
-                    <textarea
-                      id={`caption-${post.id}`}
-                      className="mt-2 min-h-36 w-full resize-y rounded-md border border-[#cbd3c7] bg-white p-3 text-sm leading-6 outline-none focus:border-[#0f7b63] focus:ring-2 focus:ring-[#b9e6d8]"
-                      value={draft?.caption ?? post.generated_caption}
-                      onChange={(event) => updateDraft(post.id, { caption: event.target.value })}
-                    />
+            {loading ? <LoadingGrid /> : null}
 
-                    <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                      <div>
-                        <p className="text-sm font-semibold">Aspect ratio</p>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {ASPECT_RATIOS.map((ratio) => (
-                            <button
-                              key={ratio.value}
-                              type="button"
-                              className={`rounded-md border px-3 py-2 text-sm ${
-                                draft?.aspectRatio === ratio.value
-                                  ? "border-[#0f7b63] bg-[#e6f5ef] text-[#0d5f4d]"
-                                  : "border-[#cbd3c7] bg-white text-[#3d4742]"
-                              }`}
-                              onClick={() => updateDraft(post.id, { aspectRatio: ratio.value })}
-                            >
-                              {ratio.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
+            {!loading && pendingPosts.length === 0 ? (
+              <EmptyState
+                title="No pending posts"
+                body="New concepts will appear here once the pipeline finishes generating them."
+              />
+            ) : null}
 
-                      <div>
-                        <p className="text-sm font-semibold">People tags</p>
-                        <div className="mt-2 max-h-28 space-y-2 overflow-auto rounded-md border border-[#d8ddd2] p-2">
-                          {tags.length === 0 ? <p className="text-sm text-[#53605a]">No active tags yet.</p> : null}
-                          {tags.map((tag) => (
-                            <label key={tag.id} className="flex items-center gap-2 text-sm">
-                              <input
-                                type="checkbox"
-                                checked={draft?.tagIds.includes(tag.id) ?? false}
-                                onChange={() => toggleTag(post.id, tag.id)}
-                              />
-                              <span>{tag.display_name}</span>
-                              {tag.handle ? <span className="text-[#66736d]">{tag.handle}</span> : null}
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-
-                    <label className="mt-5 block text-sm font-semibold" htmlFor={`reject-${post.id}`}>
-                      Rejection note
-                    </label>
-                    <input
-                      id={`reject-${post.id}`}
-                      className="mt-2 w-full rounded-md border border-[#cbd3c7] px-3 py-2 text-sm outline-none focus:border-[#0f7b63] focus:ring-2 focus:ring-[#b9e6d8]"
-                      placeholder="Optional note for the generator"
-                      value={draft?.rejectionReason ?? ""}
-                      onChange={(event) => updateDraft(post.id, { rejectionReason: event.target.value })}
-                    />
-
-                    <div className="mt-5 flex flex-wrap gap-3">
-                      <Button onClick={() => approve(post)} disabled={busyId === post.id}>
-                        <CheckCircle2 className="mr-2 h-4 w-4" />
-                        Approve
-                      </Button>
-                      <Button variant="outline" onClick={() => reject(post)} disabled={busyId === post.id}>
-                        <XCircle className="mr-2 h-4 w-4" />
-                        Reject
-                      </Button>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        </section>
-
-        <section className="mt-12 pb-12">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h2 className="text-2xl font-semibold tracking-normal">Publishing scheduler</h2>
-              <p className="mt-1 text-sm text-[#53605a]">Queue approved posts for Instagram, Facebook, and Twitter.</p>
-            </div>
-            <p className="text-sm text-[#53605a]">{queuedPosts.length} queued or processed</p>
-          </div>
-
-          {!loading && approvedPosts.length === 0 ? (
-            <EmptyState title="No approved posts" body="Approved drafts will appear here for scheduling." />
-          ) : null}
-
-          <div className="mt-5 grid gap-4">
-            {approvedPosts.map((post) => {
-              const state = schedules[post.id] ?? { scheduledAt: "", platforms: ["FACEBOOK"] };
-              return (
-                <article key={post.id} className="grid gap-4 rounded-lg border border-[#d8ddd2] bg-white p-4 md:grid-cols-[140px_1fr]">
-                  <MockupImage post={post} compact />
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <PlatformBadge platform={post.platform} />
-                      <span className="rounded-md bg-[#eef1ed] px-2 py-1 text-xs font-medium text-[#4a554f]">
-                        {post.publish_status.replace("_", " ")}
-                      </span>
-                      {post.scheduled_publish_time ? (
-                        <span className="text-xs text-[#53605a]">
-                          {new Date(post.scheduled_publish_time).toLocaleString()}
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="mt-3 line-clamp-3 text-sm leading-6 text-[#303832]">{post.generated_caption}</p>
-                    {post.last_publish_error ? (
-                      <p className="mt-2 text-sm text-[#9b3325]">{post.last_publish_error}</p>
-                    ) : null}
-
-                    <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(220px,280px)_1fr_auto] lg:items-end">
-                      <label className="block text-sm font-semibold">
-                        Publish time
-                        <input
-                          type="datetime-local"
-                          className="mt-2 w-full rounded-md border border-[#cbd3c7] px-3 py-2 text-sm outline-none focus:border-[#0f7b63] focus:ring-2 focus:ring-[#b9e6d8]"
-                          value={state.scheduledAt}
-                          onChange={(event) => updateSchedule(post.id, { scheduledAt: event.target.value })}
+            <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-3">
+              {pendingPosts.map((post) => {
+                const draft = drafts[post.id] ?? defaultDraft(post);
+                const isBusy = busyId === post.id;
+                return (
+                  <PostCard
+                    key={post.id}
+                    post={post}
+                    busy={isBusy}
+                    badge="Pending"
+                    aspectRatio={draft.aspectRatio}
+                    imageClassName={ratioToAspectClass(draft.aspectRatio)}
+                    body={
+                      <>
+                        <label className="block text-sm font-semibold text-[#1b1b1b]" htmlFor={`caption-${post.id}`}>
+                          Caption
+                        </label>
+                        <textarea
+                          id={`caption-${post.id}`}
+                          className="mt-2 min-h-40 w-full resize-y rounded-2xl border border-[#d8d1c6] bg-white p-3 text-sm leading-6 outline-none transition focus:border-[#0b5d4a] focus:ring-2 focus:ring-[#d4eee6]"
+                          value={draft.caption}
+                          onChange={(event) => updateDraft(post.id, { caption: event.target.value })}
                         />
-                      </label>
 
-                      <div>
-                        <p className="text-sm font-semibold">Channels</p>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {SCHEDULER_PLATFORMS.map((platform) => (
-                            <button
-                              key={platform}
-                              type="button"
-                              className={`rounded-md border px-3 py-2 text-sm ${
-                                state.platforms.includes(platform)
-                                  ? "border-[#0f7b63] bg-[#e6f5ef] text-[#0d5f4d]"
-                                  : "border-[#cbd3c7] bg-white text-[#3d4742]"
-                              }`}
-                              onClick={() => toggleSchedulePlatform(post.id, platform)}
-                            >
-                              {titleCase(platform)}
-                            </button>
+                        <div className="mt-4 grid gap-3">
+                          <label className="block text-sm font-semibold text-[#1b1b1b]" htmlFor={`aspect-${post.id}`}>
+                            Aspect ratio
+                          </label>
+                          <select
+                            id={`aspect-${post.id}`}
+                            className="w-full rounded-2xl border border-[#d8d1c6] bg-white px-3 py-2 text-sm outline-none transition focus:border-[#0b5d4a] focus:ring-2 focus:ring-[#d4eee6]"
+                            value={draft.aspectRatio}
+                            onChange={(event) => updateDraft(post.id, { aspectRatio: event.target.value })}
+                          >
+                            {ASPECT_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="mt-4">
+                          <TagMultiSelect
+                            tags={tags}
+                            selectedTagIds={draft.tagIds}
+                            open={openTagMenuId === post.id}
+                            onToggleOpen={() =>
+                              setOpenTagMenuId((current) => (current === post.id ? null : post.id))
+                            }
+                            onToggleTag={(tagId) => toggleTag(post.id, tagId)}
+                          />
+                        </div>
+
+                        <label className="mt-4 block text-sm font-semibold text-[#1b1b1b]" htmlFor={`reject-${post.id}`}>
+                          Rejection note
+                        </label>
+                        <input
+                          id={`reject-${post.id}`}
+                          className="mt-2 w-full rounded-2xl border border-[#d8d1c6] px-3 py-2 text-sm outline-none transition focus:border-[#0b5d4a] focus:ring-2 focus:ring-[#d4eee6]"
+                          placeholder="Optional note for the generator"
+                          value={draft.rejectionReason}
+                          onChange={(event) => updateDraft(post.id, { rejectionReason: event.target.value })}
+                        /> 
+
+                        <div className="mt-5 flex flex-wrap gap-3">
+                          <Button onClick={() => approve(post)} disabled={isBusy}>
+                            {isBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <BadgeCheck className="mr-2 h-4 w-4" />}
+                            Approve
+                          </Button>
+                          <Button variant="outline" onClick={() => reject(post)} disabled={isBusy}>
+                            <XCircle className="mr-2 h-4 w-4" />
+                            Reject
+                          </Button>
+                        </div>
+                      </>
+                    }
+                  />
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="mt-12 pb-12">
+            <SectionHeader
+              title="Approved"
+              body={`${approvedPosts.length} posts ready for scheduling or publishing`}
+              right={<BadgeChip>{approvedPosts.filter((post) => post.publish_status !== "NOT_SCHEDULED").length} queued</BadgeChip>}
+            />
+
+            {!loading && approvedPosts.length === 0 ? (
+              <EmptyState title="No approved posts" body="Branded approvals will move into this queue automatically." />
+            ) : null}
+
+            <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-3">
+              {approvedPosts.map((post) => {
+                const state = schedules[post.id] ?? { scheduledAt: "", platforms: ["FACEBOOK"] };
+                const isBusy = busyId === post.id;
+                return (
+                  <PostCard
+                    key={post.id}
+                    post={post}
+                    busy={isBusy}
+                    badge={post.publish_status.replace("_", " ")}
+                    aspectRatio={post.selected_aspect_ratio}
+                    imageClassName={ratioToAspectClass(post.selected_aspect_ratio)}
+                    body={
+                      <>
+                        <p className="text-sm leading-6 text-[#3a3732]">{post.generated_caption}</p>
+
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          {post.tags.length === 0 ? <BadgeChip muted>No tags</BadgeChip> : null}
+                          {post.tags.map((tag) => (
+                            <BadgeChip key={tag.id}>
+                              {tag.display_name}
+                              {tag.handle ? <span className="ml-1 text-[#7a756f]">{tag.handle}</span> : null}
+                            </BadgeChip>
                           ))}
                         </div>
-                      </div>
 
-                      <Button onClick={() => schedule(post)} disabled={busyId === post.id}>
-                        <Send className="mr-2 h-4 w-4" />
-                        Schedule
-                      </Button>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
+                        <div className="mt-4 grid gap-3">
+                          <label className="block text-sm font-semibold text-[#1b1b1b]">
+                            Publish time
+                            <input
+                              type="datetime-local"
+                              className="mt-2 w-full rounded-2xl border border-[#d8d1c6] px-3 py-2 text-sm outline-none transition focus:border-[#0b5d4a] focus:ring-2 focus:ring-[#d4eee6]"
+                              value={state.scheduledAt}
+                              onChange={(event) => updateSchedule(post.id, { scheduledAt: event.target.value })}
+                            />
+                          </label>
+
+                          <div>
+                            <p className="text-sm font-semibold text-[#1b1b1b]">Channels</p>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {SCHEDULER_PLATFORMS.map((platform) => (
+                                <button
+                                  key={platform}
+                                  type="button"
+                                  className={`rounded-2xl border px-3 py-2 text-sm transition ${
+                                    state.platforms.includes(platform)
+                                      ? "border-[#0b5d4a] bg-[#e8f3ee] text-[#0b5d4a]"
+                                      : "border-[#d8d1c6] bg-white text-[#3a3732]"
+                                  }`}
+                                  onClick={() => toggleSchedulePlatform(post.id, platform)}
+                                >
+                                  {titleCase(platform)}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <Button onClick={() => schedule(post)} disabled={isBusy}>
+                            <Clock3 className="mr-2 h-4 w-4" />
+                            Schedule
+                          </Button>
+                        </div>
+                      </>
+                    }
+                  />
+                );
+              })}
+            </div>
+          </section>
         </section>
-      </section>
+      </div>
     </main>
   );
 
@@ -430,56 +537,231 @@ export default function TeamWorkspace() {
   }
 }
 
-function defaultDraft(): DraftState {
-  return { caption: "", aspectRatio: "SQUARE_1_1", tagIds: [], rejectionReason: "" };
-}
-
-function defaultSchedule(): ScheduleState {
-  return { scheduledAt: "", platforms: ["FACEBOOK"] };
-}
-
-function MockupImage({ post, compact = false }: { post: Post; compact?: boolean }) {
+function PostCard({
+  post,
+  busy,
+  badge,
+  aspectRatio,
+  imageClassName,
+  body
+}: {
+  post: Post;
+  busy: boolean;
+  badge: string;
+  aspectRatio: string;
+  imageClassName: string;
+  body: ReactNode;
+}) {
   return (
-    <div className={`relative overflow-hidden bg-[#e9ede7] ${compact ? "h-32 rounded-md" : "min-h-72 lg:min-h-full"}`}>
-      {post.asset?.preview_url ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={post.asset.preview_url} alt="" className="h-full w-full object-cover" />
-      ) : (
-        <div className="flex h-full min-h-32 items-center justify-center p-6 text-center text-sm text-[#53605a]">
-          Generated image mockup will appear here.
+    <article className="overflow-visible rounded-[1.75rem] border border-[#d9d2c7] bg-white shadow-[0_14px_45px_rgba(17,17,17,0.06)]">
+      <div className={`relative overflow-hidden bg-[#e9ece6] ${imageClassName}`}>
+        {post.asset?.preview_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={post.asset.preview_url} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <div className="flex h-full min-h-56 items-center justify-center p-6 text-center text-sm text-[#63615b]">
+            Branded image will appear here.
+          </div>
+        )}
+
+        <div className="absolute left-4 top-4 flex flex-wrap items-center gap-2">
+          <BadgeChip dark>{titleCase(post.platform)}</BadgeChip>
+          <BadgeChip>{badge}</BadgeChip>
         </div>
-      )}
-      <div className="absolute bottom-3 left-3 rounded-md bg-white/90 px-2 py-1 text-xs font-medium text-[#303832]">
-        {post.asset?.file_name ?? "No asset"}
+
+        <div className="absolute bottom-4 right-4 rounded-full bg-black/70 px-3 py-1 text-xs font-medium text-white">
+          {aspectLabel(aspectRatio)}
+        </div>
       </div>
+
+      <div className="p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[#0b5d4a]">
+              {busy ? "Working..." : "Post concept"}
+            </p>
+            {post.last_publish_error ? (
+              <p className="mt-2 text-sm text-[#8e3527]">{post.last_publish_error}</p>
+            ) : null}
+          </div>
+          {post.scheduled_publish_time ? (
+            <span className="rounded-full bg-[#eef1ed] px-3 py-1 text-xs font-medium text-[#4d5851]">
+              {new Date(post.scheduled_publish_time).toLocaleString()}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="mt-4">{body}</div>
+      </div>
+    </article>
+  );
+}
+
+function TagMultiSelect({
+  tags,
+  selectedTagIds,
+  open,
+  onToggleOpen,
+  onToggleTag
+}: {
+  tags: TagDirectoryItem[];
+  selectedTagIds: string[];
+  open: boolean;
+  onToggleOpen: () => void;
+  onToggleTag: (tagId: string) => void;
+}) {
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between rounded-2xl border border-[#d8d1c6] bg-white px-3 py-2 text-left text-sm transition hover:border-[#0b5d4a] focus:outline-none focus:ring-2 focus:ring-[#d4eee6]"
+        onClick={onToggleOpen}
+      >
+        <span className="flex items-center gap-2">
+          <Tag className="h-4 w-4 text-[#0b5d4a]" />
+          Tags
+          <span className="rounded-full bg-[#e8f3ee] px-2 py-0.5 text-xs font-semibold text-[#0b5d4a]">
+            {selectedTagIds.length}
+          </span>
+        </span>
+        <ChevronDown className={`h-4 w-4 transition ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open ? (
+        <div className="absolute z-30 mt-2 w-full rounded-2xl border border-[#d8d1c6] bg-white p-3 shadow-xl">
+          <div className="max-h-56 space-y-2 overflow-auto pr-1">
+            {tags.length === 0 ? <p className="text-sm text-[#63615b]">No active tags yet.</p> : null}
+            {tags.map((tag) => {
+              const checked = selectedTagIds.includes(tag.id);
+              return (
+                <label
+                  key={tag.id}
+                  className="flex cursor-pointer items-start gap-2 rounded-xl px-2 py-1.5 text-sm transition hover:bg-[#f6f8f4]"
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => onToggleTag(tag.id)}
+                    className="mt-1 h-4 w-4 rounded border-[#c9c2b7]"
+                  />
+                  <span className="flex-1">
+                    <span className="block font-medium text-[#1b1b1b]">{tag.display_name}</span>
+                    <span className="block text-xs text-[#6d6963]">
+                      {tag.handle ?? "No handle"} {tag.platform ? `• ${titleCase(tag.platform)}` : ""}
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <div className="mt-3 flex items-center justify-between">
+            <p className="text-xs text-[#6d6963]">{selectedTagIds.length} selected</p>
+            <Button variant="outline" onClick={onToggleOpen}>
+              Done
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function PlatformBadge({ platform }: { platform: string }) {
-  return <span className="rounded-md bg-[#171717] px-2 py-1 text-xs font-semibold text-white">{titleCase(platform)}</span>;
+function NavLink({
+  label,
+  href,
+  icon,
+  active = false
+}: {
+  label: string;
+  href?: string;
+  icon: React.ReactNode;
+  active?: boolean;
+}) {
+  const content = (
+    <div
+      className={`flex items-center justify-between rounded-2xl px-4 py-3 text-sm transition ${
+        active ? "bg-white text-[#111111]" : "text-white/75 hover:bg-white/10 hover:text-white"
+      }`}
+    >
+      <span className="flex items-center gap-3">
+        {icon}
+        {label}
+      </span>
+      <ArrowUpRight className="h-4 w-4" />
+    </div>
+  );
+
+  if (href) {
+    return <Link href={href}>{content}</Link>;
+  }
+
+  return content;
+}
+
+function SectionHeader({
+  title,
+  body,
+  right
+}: {
+  title: string;
+  body: string;
+  right?: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <h3 className="text-2xl font-semibold tracking-tight text-[#111111]">{title}</h3>
+        <p className="mt-1 text-sm text-[#63615b]">{body}</p>
+      </div>
+      {right}
+    </div>
+  );
+}
+
+function BadgeChip({
+  children,
+  dark = false,
+  muted = false
+}: {
+  children: React.ReactNode;
+  dark?: boolean;
+  muted?: boolean;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ${
+        dark
+          ? "bg-black/70 text-white"
+          : muted
+            ? "bg-[#f1ede6] text-[#5a554f]"
+            : "bg-[#e8f3ee] text-[#0b5d4a]"
+      }`}
+    >
+      {children}
+    </span>
+  );
 }
 
 function EmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <div className="mt-5 rounded-lg border border-dashed border-[#c5cec1] bg-white p-8 text-center">
-      <CalendarClock className="mx-auto h-8 w-8 text-[#0f7b63]" />
-      <h3 className="mt-3 font-semibold">{title}</h3>
-      <p className="mt-1 text-sm text-[#53605a]">{body}</p>
+    <div className="mt-5 rounded-[1.75rem] border border-dashed border-[#cec7bc] bg-white p-8 text-center">
+      <BadgeCheck className="mx-auto h-8 w-8 text-[#0b5d4a]" />
+      <h4 className="mt-3 text-lg font-semibold">{title}</h4>
+      <p className="mt-2 text-sm leading-6 text-[#63615b]">{body}</p>
     </div>
   );
 }
 
 function LoadingGrid() {
   return (
-    <div className="mt-5 grid gap-5 lg:grid-cols-2">
-      {[1, 2].map((item) => (
-        <div key={item} className="grid overflow-hidden rounded-lg border border-[#d8ddd2] bg-white lg:grid-cols-[minmax(220px,0.85fr)_1.15fr]">
-          <div className="min-h-72 animate-pulse bg-[#e9ede7]" />
+    <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-3">
+      {[1, 2, 3].map((item) => (
+        <div key={item} className="overflow-hidden rounded-[1.75rem] border border-[#d9d2c7] bg-white">
+          <div className="aspect-square animate-pulse bg-[#e8ebe4]" />
           <div className="space-y-4 p-5">
-            <div className="h-5 w-32 animate-pulse rounded bg-[#e9ede7]" />
-            <div className="h-36 animate-pulse rounded bg-[#e9ede7]" />
-            <div className="h-10 animate-pulse rounded bg-[#e9ede7]" />
+            <div className="h-4 w-24 animate-pulse rounded-full bg-[#e8ebe4]" />
+            <div className="h-28 animate-pulse rounded-2xl bg-[#e8ebe4]" />
+            <div className="h-10 animate-pulse rounded-2xl bg-[#e8ebe4]" />
           </div>
         </div>
       ))}
@@ -495,17 +777,49 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers ?? {})
     }
   });
+
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(typeof payload?.detail === "string" ? payload.detail : "Request failed.");
   }
+
   return response.json();
 }
 
 function titleCase(value: string) {
-  return value.toLowerCase().replace(/(^|_)([a-z])/g, (_match, prefix, char) => `${prefix ? " " : ""}${char.toUpperCase()}`);
+  return value
+    .toLowerCase()
+    .replace(/(^|_)([a-z])/g, (_match, prefix, char) => `${prefix ? " " : ""}${char.toUpperCase()}`);
 }
 
 function normalizeAspect(value: string) {
-  return ASPECT_RATIOS.some((ratio) => ratio.value === value) ? value : "SQUARE_1_1";
+  return ASPECT_OPTIONS.some((ratio) => ratio.value === value) ? value : "SQUARE_1_1";
+}
+
+function defaultDraft(post?: Post): DraftState {
+  return {
+    caption: post?.generated_caption ?? "",
+    aspectRatio: normalizeAspect(post?.selected_aspect_ratio ?? "SQUARE_1_1"),
+    tagIds: post?.tags.map((tag) => tag.id) ?? [],
+    rejectionReason: ""
+  };
+}
+
+function defaultSchedule(): ScheduleState {
+  return { scheduledAt: "", platforms: ["FACEBOOK"] };
+}
+
+function ratioToAspectClass(value: string) {
+  switch (normalizeAspect(value)) {
+    case "PORTRAIT_4_5":
+      return "aspect-[4/5]";
+    case "LANDSCAPE_16_9":
+      return "aspect-video";
+    default:
+      return "aspect-square";
+  }
+}
+
+function aspectLabel(value: string) {
+  return ASPECT_OPTIONS.find((ratio) => ratio.value === normalizeAspect(value))?.label ?? "1:1";
 }

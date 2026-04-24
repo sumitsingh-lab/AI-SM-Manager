@@ -60,6 +60,18 @@ class MagazineMockupRequest(BaseModel):
     user_id: str | None = None
 
 
+class BrandCropRequest(BaseModel):
+    source_asset_id: str
+    aspect_ratio: AspectRatioName
+    campaign_id: str | None = None
+    user_id: str | None = None
+
+
+class BrandCropResponse(BaseModel):
+    asset_id: str
+    local_url: str
+
+
 @router.get("/templates", response_model=list[TemplateSummary])
 async def list_templates() -> list[TemplateSummary]:
     return [
@@ -134,6 +146,18 @@ async def compose_magazine_mockup(request: MagazineMockupRequest) -> GeneratedIm
         user_id=request.user_id,
     )
     return _response(asset, stored, image, metadata)
+
+
+@router.post("/brand-and-crop", response_model=BrandCropResponse, status_code=status.HTTP_201_CREATED)
+async def brand_and_crop(request: BrandCropRequest) -> BrandCropResponse:
+    service = ImageCompositionService()
+    asset, stored = await service.apply_branding_and_crop(
+        asset_id=request.source_asset_id,
+        aspect_ratio=request.aspect_ratio,
+        campaign_id=request.campaign_id,
+        user_id=request.user_id,
+    )
+    return BrandCropResponse(asset_id=asset.id, local_url=stored.public_url)
 
 
 def _response(asset, stored, image, metadata: dict) -> GeneratedImageResponse:

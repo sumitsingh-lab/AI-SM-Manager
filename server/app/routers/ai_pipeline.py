@@ -22,6 +22,7 @@ class DraftPostResponse(BaseModel):
 class PipelineResponse(BaseModel):
     asset_id: str
     metadata: MagazineMetadata
+    extracted_image_asset_ids: list[str]
     review: ReviewResponse
     posts: list[DraftPostResponse]
 
@@ -42,11 +43,9 @@ async def upload_pdf_and_generate_drafts(
     user_id: str | None = Form(default=None),
     description: str | None = Form(default=None),
     file: UploadFile = File(...),
-    model_image: UploadFile | None = File(default=None),
 ) -> PipelineResponse:
     result = await PipelineService().upload_and_process_pdf(
         file=file,
-        model_image=model_image,
         campaign_id=campaign_id,
         user_id=user_id,
         description=description,
@@ -58,6 +57,7 @@ def _to_response(result) -> PipelineResponse:
     return PipelineResponse(
         asset_id=result.asset_id,
         metadata=result.metadata,
+        extracted_image_asset_ids=result.extracted_image_asset_ids,
         review=ReviewResponse(approved=result.review.approved, overall_notes=result.review.overall_notes),
         posts=[
             DraftPostResponse(

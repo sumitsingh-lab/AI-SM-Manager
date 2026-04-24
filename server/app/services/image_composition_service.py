@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 from typing import Literal
 
 from fastapi import HTTPException, status
@@ -12,6 +13,8 @@ from app.services.json_utils import prisma_json
 from app.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
+SERVER_ROOT = Path(__file__).resolve().parents[2]
+WMH_LOGO_PATH = SERVER_ROOT / "assets" / "wmh_logo.png"
 
 AspectRatioName = Literal["SQUARE_1_1", "PORTRAIT_4_5", "LANDSCAPE_16_9"]
 FitMode = Literal["crop", "pad"]
@@ -81,6 +84,54 @@ TEMPLATES: dict[str, CompositionTemplate] = {
 
 
 class ImageCompositionService:
+    async def apply_branding_and_crop(
+        self,
+        asset_id: str,
+        aspect_ratio: AspectRatioName,
+        campaign_id: str | None = None,
+        user_id: str | None = None,
+    ) -> tuple[object, object]:
+        asset = await db.asset.find_unique(where={"id": asset_id})
+        if asset is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found.")
+        if not asset.contentType.startswith("image/") or not asset.gcsObjectName:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Asset must be an uploaded image.")
+
+        source = await self._load_image_asset(asset_id)
+        cropped = self.apply_aspect_ratio(source, aspect_ratio, fit="crop").convert("RGBA")
+        branded = self._overlay_branding(cropped)
+        file_name = f"branded-{Path(asset.fileName).stem}-{aspect_ratio.lower()}.png"
+        encoded = self._encode(branded, file_name)
+        stored = StorageService().upload_generated_image(
+            encoded.data,
+            encoded.file_name,
+            prefix="generated/brand-crops",
+            content_type=encoded.content_type,
+        )
+        new_asset = await db.asset.create(
+            data={
+                "type": "MODEL_IMAGE",
+                "fileName": stored.file_name,
+                "contentType": stored.content_type,
+                "fileSizeBytes": stored.file_size_bytes,
+                "gcsUrl": stored.gcs_url,
+                "gcsBucket": stored.gcs_bucket,
+                "gcsObjectName": stored.gcs_object_name,
+                "thumbnailUrl": stored.signed_url,
+                "metadata": prisma_json(
+                    {
+                        "operation": "brand_and_crop",
+                        "sourceAssetId": asset_id,
+                        "aspectRatio": aspect_ratio,
+                        "sourceFileName": asset.fileName,
+                    }
+                ),
+                "createdById": user_id,
+                "campaignId": campaign_id,
+            }
+        )
+        return new_asset, stored
+
     async def compose_text_overlay(
         self,
         image_asset_id: str,
@@ -201,6 +252,51 @@ class ImageCompositionService:
         y = (target_size[1] - image.height) // 2
         background.alpha_composite(image.convert("RGBA"), (x, y))
         return background
+
+    def _overlay_branding(self, image: Image.Image) -> Image.Image:
+        canvas = image.convert("RGBA")
+        padding = max(24, canvas.width // 40)
+        logo = self._load_brand_logo()
+        if logo is not None:
+            logo_width = max(96, int(canvas.width * 0.18))
+            logo_height = max(48, int(logo.height * (logo_width / logo.width)))
+            logo = ImageOps.contain(logo, (logo_width, logo_height))
+            x = canvas.width - logo.width - padding
+            y = canvas.height - logo.height - padding
+            canvas.alpha_composite(logo, (x, y))
+            return canvas
+
+        return self._draw_text_watermark(canvas, padding)
+
+    @staticmethod
+    def _load_brand_logo() -> Image.Image | None:
+        if not WMH_LOGO_PATH.exists():
+            logger.warning("WMH logo not found at %s. Falling back to text watermark.", WMH_LOGO_PATH)
+            return None
+        try:
+            logo = Image.open(WMH_LOGO_PATH)
+            logo.load()
+            return logo.convert("RGBA")
+        except Exception:
+            logger.exception("Could not load WMH logo from %s", WMH_LOGO_PATH)
+            return None
+
+    def _draw_text_watermark(self, image: Image.Image, padding: int) -> Image.Image:
+        canvas = image.copy()
+        draw = ImageDraw.Draw(canvas)
+        text = "WMH India"
+        font_size = max(22, canvas.width // 30)
+        font = self._font(font_size)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        x = canvas.width - text_width - padding
+        y = canvas.height - text_height - padding
+        shadow = (0, 0, 0, 140)
+        fill = (255, 255, 255, 210)
+        draw.text((x + 2, y + 2), text, font=font, fill=shadow)
+        draw.text((x, y), text, font=font, fill=fill)
+        return canvas
 
     async def _load_image_asset(self, asset_id: str) -> Image.Image:
         asset = await db.asset.find_unique(where={"id": asset_id})

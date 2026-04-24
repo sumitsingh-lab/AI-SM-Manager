@@ -47,6 +47,7 @@ class ReviewPostRequest(BaseModel):
     generated_caption: str | None = None
     selected_aspect_ratio: AspectRatioName | None = None
     tag_ids: list[str] = Field(default_factory=list)
+    asset_id: str | None = None
 
 
 class RejectPostRequest(BaseModel):
@@ -87,6 +88,8 @@ async def approve_post(post_id: str, request: ReviewPostRequest) -> PostResponse
         data["generatedCaption"] = request.generated_caption
     if request.selected_aspect_ratio is not None:
         data["selectedAspectRatio"] = request.selected_aspect_ratio
+    if request.asset_id is not None:
+        data["assetId"] = request.asset_id
 
     updated = await db.post.update(where={"id": post_id}, data=data)
     await _replace_tags(post_id, request.tag_ids)
